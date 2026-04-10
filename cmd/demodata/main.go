@@ -26,7 +26,11 @@ func main() {
 		flag.Usage()
 		return
 	} else if *useUI {
-		if err := ui.Start(); err != nil {
+		var startOnFile *os.File = nil
+		if *inputFile != "" {
+			startOnFile, _ = os.Open(*inputFile)
+		}
+		if err := ui.Start(startOnFile); err != nil {
 			fmt.Fprintf(os.Stderr, "erreur ui : %v\n", err)
 			os.Exit(1)
 		}

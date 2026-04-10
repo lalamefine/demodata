@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"os"
 
@@ -28,47 +29,53 @@ type uiState struct {
 	ruleConfig    *config.Config
 	selectedIndex int
 
-	list        *widget.List
-	columnEntry *widget.Entry
-	typeSelect  *widget.Select
-	formatEntry *widget.Entry
-	valuesEntry *widget.Entry
-	statusLabel *widget.Label
+	rules                *widget.List
+	columnEntry          *widget.Entry
+	typeSelect           *widget.Select
+	formatEntry          *widget.Entry
+	valuesEntry          *widget.Entry
+	statusLabel          *widget.Label
+	split                *container.Split
+	resizeMonitorStarted bool
 }
 
 // Start démarre l'interface utilisateur.
-func Start() error {
+func Start(filepath *os.File) error {
 	a := app.New()
 	w := a.NewWindow("Data Mixer Dev Tool")
 	w.Resize(fyne.NewSize(600, 300))
 
 	state := &uiState{selectedIndex: -1}
 
-	w.SetOnDropped(func(position fyne.Position, uris []fyne.URI) {
-		if len(uris) == 0 {
-			return
-		}
-
-		uri := uris[0]
-		if uri.Scheme() != "file" {
-			return
-		}
-
-		path := uri.Path()
-		if path == "" {
-			return
-		}
-
-		f, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-
-		loadDataset(w, state, f, path, widget.NewLabel("Dropped file loading..."))
-	})
-
 	w.SetContent(initialContent(w, state))
+	if filepath != nil {
+		loadDataset(w, state, filepath, filepath.Name(), widget.NewLabel("Loading initial file..."))
+	} else {
+		w.SetOnDropped(func(position fyne.Position, uris []fyne.URI) {
+			if len(uris) == 0 {
+				return
+			}
+
+			uri := uris[0]
+			if uri.Scheme() != "file" {
+				return
+			}
+
+			path := uri.Path()
+			if path == "" {
+				return
+			}
+
+			f, err := os.Open(path)
+			if err != nil {
+				return
+			}
+			defer f.Close()
+
+			loadDataset(w, state, f, path, widget.NewLabel("Dropped file loading..."))
+		})
+	}
+
 	w.ShowAndRun()
 
 	return nil
@@ -116,7 +123,7 @@ func loadDataset(w fyne.Window, state *uiState, reader io.Reader, path string, s
 	state.ruleConfig = inferer.InferRuleSet(recs)
 	state.selectedIndex = -1
 
-	state.list = nil
+	state.rules = nil
 
 	w.Resize(fyne.NewSize(1250, 760))
 	w.SetContent(mainUI(w, state, status))
@@ -127,7 +134,7 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		status.SetText("No inferred rules available")
 	}
 	w.Resize(fyne.NewSize(1200, 760))
-	state.list = widget.NewList(
+	state.rules = widget.NewList(
 		func() int {
 			if state.ruleConfig == nil || len(state.ruleConfig.Tables) == 0 {
 				return 0
@@ -144,7 +151,7 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		},
 	)
 
-	state.list.OnSelected = func(id widget.ListItemID) {
+	state.rules.OnSelected = func(id widget.ListItemID) {
 		state.selectedIndex = id
 		r := state.ruleConfig.Tables[0].Transformers[id]
 		state.columnEntry.SetText(fmt.Sprint(r.Options["column_name"]))
@@ -195,7 +202,10 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		}
 
 		status.SetText("Rule saved")
-		state.list.Refresh()
+		state.rules.Refresh()
+
+		// Rebuild to recompute left panel width from current rule labels.
+		w.SetContent(mainUI(w, state, status))
 	})
 
 	saveConfigBtn := widget.NewButton("Save ruleset config", func() {
@@ -255,31 +265,33 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 
 	state.statusLabel = status
 
-	left := container.NewVBox(
+	addRuleBtn := widget.NewButton("Add rule", func() {
+		if state.ruleConfig == nil {
+			state.ruleConfig = &config.Config{Tables: []config.TableConfig{{Name: "default", Transformers: []config.TransformerConfig{}}}}
+		}
+
+		if len(state.ruleConfig.Tables) == 0 {
+			state.ruleConfig.Tables = append(state.ruleConfig.Tables, config.TableConfig{Name: "default", Transformers: []config.TransformerConfig{}})
+		}
+
+		newRule := config.TransformerConfig{
+			Name:    "new_rule",
+			Type:    "sampler",
+			Options: map[string]any{"column_name": "", "format": "", "values": []any{}},
+		}
+		state.ruleConfig.Tables[0].Transformers = append(state.ruleConfig.Tables[0].Transformers, newRule)
+		state.selectedIndex = len(state.ruleConfig.Tables[0].Transformers) - 1
+		state.rules.Refresh()
+
+		// Rebuild main UI to reflect state changes
+		w.SetContent(mainUI(w, state, status))
+	})
+
+	left := container.NewBorder(
 		widget.NewLabel("Rules"),
-		state.list,
-		saveConfigBtn,
-		widget.NewButton("Add rule", func() {
-			if state.ruleConfig == nil {
-				state.ruleConfig = &config.Config{Tables: []config.TableConfig{{Name: "default", Transformers: []config.TransformerConfig{}}}}
-			}
-
-			if len(state.ruleConfig.Tables) == 0 {
-				state.ruleConfig.Tables = append(state.ruleConfig.Tables, config.TableConfig{Name: "default", Transformers: []config.TransformerConfig{}})
-			}
-
-			newRule := config.TransformerConfig{
-				Name:    "new_rule",
-				Type:    "sampler",
-				Options: map[string]any{"column_name": "", "format": "", "values": []any{}},
-			}
-			state.ruleConfig.Tables[0].Transformers = append(state.ruleConfig.Tables[0].Transformers, newRule)
-			state.selectedIndex = len(state.ruleConfig.Tables[0].Transformers) - 1
-			state.list.Refresh()
-
-			// Rebuild main UI to reflect state changes
-			w.SetContent(mainUI(w, state, status))
-		}),
+		container.NewVBox(saveConfigBtn, addRuleBtn),
+		nil, nil,
+		state.rules,
 	)
 
 	var r1 *fyne.Container
@@ -307,11 +319,75 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		outputEntry,
 		chooseOutputBtn,
 		applyBtn,
-		status,
+		state.statusLabel,
 	)
 	right := container.NewVSplit(r1, r2)
 
+	// Compute ideal left-panel width: fit longest list label, capped at 50% of window width.
+	windowWidth := w.Canvas().Size().Width
+	if windowWidth <= 0 {
+		windowWidth = 1200
+	}
+	idealWidth := float32(160) // minimum fallback
+	if state.ruleConfig != nil && len(state.ruleConfig.Tables) > 0 {
+		for i, t := range state.ruleConfig.Tables[0].Transformers {
+			lbl := widget.NewLabel(fmt.Sprintf("%d. %s (%s)", i+1, t.Name, t.Type))
+			if needed := lbl.MinSize().Width + 48; needed > idealWidth { // 48 = list padding + scrollbar
+				idealWidth = needed
+			}
+		}
+	}
+	if max := windowWidth / 3; idealWidth > max {
+		idealWidth = max
+	}
+
 	split := container.NewHSplit(left, right)
-	split.SetOffset(0.25)
+	state.split = split
+	if !state.resizeMonitorStarted {
+		state.resizeMonitorStarted = true
+		go watchWindowResize(w, state)
+	}
+	split.SetOffset(idealLeftOffset(w, state, windowWidth, idealWidth))
 	return split
+}
+
+func idealLeftOffset(w fyne.Window, state *uiState, windowWidth, idealWidth float32) float64 {
+	if windowWidth <= 0 {
+		return 1.0 / 3.0
+	}
+	return float64(idealWidth / windowWidth)
+}
+
+func watchWindowResize(w fyne.Window, state *uiState) {
+	lastW := w.Canvas().Size().Width
+	for {
+		time.Sleep(150 * time.Millisecond)
+		size := w.Canvas().Size()
+		if size.Width == lastW {
+			continue
+		}
+		lastW = size.Width
+		if state == nil || state.split == nil {
+			continue
+		}
+		windowWidth := size.Width
+		idealWidth := float32(160)
+		if state.ruleConfig != nil && len(state.ruleConfig.Tables) > 0 {
+			for i, t := range state.ruleConfig.Tables[0].Transformers {
+				lbl := widget.NewLabel(fmt.Sprintf("%d. %s (%s)", i+1, t.Name, t.Type))
+				if needed := lbl.MinSize().Width + 48; needed > idealWidth {
+					idealWidth = needed
+				}
+			}
+		}
+		if max := windowWidth / 3; idealWidth > max {
+			idealWidth = max
+		}
+		offset := float64(idealWidth / windowWidth)
+		fyne.Do(func() {
+			if state.split != nil {
+				state.split.SetOffset(offset)
+			}
+		})
+	}
 }
