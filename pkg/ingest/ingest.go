@@ -3,9 +3,11 @@ package ingest
 import (
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,9 +17,14 @@ import (
 // Record représente une ligne / un objet de données homogène.
 type Record map[string]interface{}
 
+// Dataset représente un ensemble multi-table (nom de table -> lignes).
+type Dataset map[string][]Record
+
+const DefaultTableName = "default"
+
 // LoadCSV ré-hydrate un flux CSV en une liste de Records.
 // Cette fonction est un stub et doit être complétée pour gérer les dialectes CSV.
-func LoadCSV(r io.Reader) ([]Record, error) {
+func LoadCSV(r io.Reader) (Dataset, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
 	// Lire l'en-tête
@@ -61,11 +68,11 @@ func LoadCSV(r io.Reader) ([]Record, error) {
 		records = append(records, rec)
 	}
 
-	return records, nil
+	return Dataset{DefaultTableName: records}, nil
 }
 
 // LoadJSON charge une liste d'objets JSON depuis un flux.
-func LoadJSON(r io.Reader) ([]Record, error) {
+func LoadJSON(r io.Reader) (Dataset, error) {
 	decoder := json.NewDecoder(r)
 	decoder.UseNumber()
 
@@ -76,7 +83,7 @@ func LoadJSON(r io.Reader) ([]Record, error) {
 
 	arr, ok := raw.([]interface{})
 	if !ok {
-		return nil, &json.UnmarshalTypeError{Value: "non-array", Type: nil}
+		return nil, fmt.Errorf("json attendu: tableau d'objets")
 	}
 
 	records := make([]Record, 0, len(arr))
@@ -92,12 +99,12 @@ func LoadJSON(r io.Reader) ([]Record, error) {
 		records = append(records, rec)
 	}
 
-	return records, nil
+	return Dataset{DefaultTableName: records}, nil
 }
 
 // LoadXLSX lit le premier onglet d'un fichier Excel (XLSX) et en extrait une liste de Record.
 // La première ligne est interprétée comme l'en-tête des colonnes.
-func LoadXLSX(r io.Reader) ([]Record, error) {
+func LoadXLSX(r io.Reader) (Dataset, error) {
 	f, err := excelize.OpenReader(r)
 	if err != nil {
 		return nil, err
@@ -106,42 +113,47 @@ func LoadXLSX(r io.Reader) ([]Record, error) {
 
 	sheets := f.GetSheetList()
 	if len(sheets) == 0 {
-		return nil, nil
+		return Dataset{}, nil
 	}
 
-	rows, err := f.GetRows(sheets[0])
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
-	headers := rows[0]
-	log.Printf("headers ignorés: %v", headers)
-	records := make([]Record, 0, len(rows)-1)
-
-	for _, row := range rows[1:] {
-		if len(row) == 0 {
+	dataset := make(Dataset, len(sheets))
+	for _, sheet := range sheets {
+		rows, err := f.GetRows(sheet)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			dataset[normalizeTableName(sheet)] = []Record{}
 			continue
 		}
-		min := len(headers)
-		if len(row) < min {
-			min = len(row)
+
+		headers := rows[0]
+		log.Printf("headers onglet %s: %v", sheet, headers)
+		records := make([]Record, 0, len(rows)-1)
+
+		for _, row := range rows[1:] {
+			if len(row) == 0 {
+				continue
+			}
+			min := len(headers)
+			if len(row) < min {
+				min = len(row)
+			}
+			rec := make(Record)
+			for i := 0; i < min; i++ {
+				rec[headers[i]] = parseStringValue(row[i])
+			}
+			records = append(records, rec)
 		}
-		rec := make(Record)
-		for i := 0; i < min; i++ {
-			rec[headers[i]] = parseStringValue(row[i])
-		}
-		records = append(records, rec)
+		dataset[normalizeTableName(sheet)] = records
 	}
 
-	return records, nil
+	return dataset, nil
 }
 
 // Load charge des données depuis un lecteur en fonction du format fourni.
 // Les formats supportés sont : "csv", "json", "xlsx".
-func Load(r io.Reader, format string) ([]Record, error) {
+func Load(r io.Reader, format string) (Dataset, error) {
 	switch format {
 	case "csv":
 		return LoadCSV(r)
@@ -208,14 +220,29 @@ func normalizeJSONValue(v interface{}) interface{} {
 	}
 }
 
-func LoadFile(path string) ([]Record, error) {
+func LoadFile(path string) (Dataset, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	return Load(file, GetFileExtension(path))
+	format := GetFileExtension(path)
+	dataset, err := Load(file, format)
+	if err != nil {
+		return nil, err
+	}
+
+	if format == "csv" || format == "json" {
+		if records, ok := dataset[DefaultTableName]; ok {
+			tableName := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			tableName = normalizeTableName(tableName)
+			delete(dataset, DefaultTableName)
+			dataset[tableName] = records
+		}
+	}
+
+	return dataset, nil
 }
 
 func GetFileExtension(path string) string {
@@ -223,4 +250,12 @@ func GetFileExtension(path string) string {
 		return strings.ToLower(path[i+1:])
 	}
 	return ""
+}
+
+func normalizeTableName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return DefaultTableName
+	}
+	return trimmed
 }

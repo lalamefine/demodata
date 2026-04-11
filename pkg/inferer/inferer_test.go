@@ -12,7 +12,7 @@ func TestInferRuleSet(t *testing.T) {
 		{"id": int64(2), "name": "Bob", "email": "bob@example.com", "secret": "s2"},
 	}
 
-	cfg := InferRuleSet(recs)
+	cfg := InferRuleSet(ingest.Dataset{"default": recs})
 	if cfg == nil || len(cfg.Tables) != 1 {
 		t.Fatalf("expected 1 table rule, got %+v", cfg)
 	}
@@ -22,34 +22,34 @@ func TestInferRuleSet(t *testing.T) {
 		t.Fatalf("expected au moins 2 transformers, got %d", len(trans))
 	}
 
-	foundMasker := false
+	foundSecret := false
 	foundEmail := false
-	foundIDGen := false
+	foundID := false
 	for _, tcfg := range trans {
-		if tcfg.Type == "sampler" && tcfg.Options["column_name"] == "secret" {
-			foundMasker = true
+		if tcfg.Type == "none" && tcfg.Options["column_name"] == "secret" {
+			foundSecret = true
 		}
-		if tcfg.Type == "sampler" && tcfg.Options["column_name"] == "email" {
+		if tcfg.Type == "none" && tcfg.Options["column_name"] == "email" {
 			foundEmail = true
 		}
-		if tcfg.Type == "sampler" && tcfg.Options["column_name"] == "id" {
-			foundIDGen = true
+		if tcfg.Type == "none" && tcfg.Options["column_name"] == "id" {
+			foundID = true
 		}
 	}
 
-	if !foundMasker {
-		t.Fatal("expected masker rule for secret")
+	if !foundSecret {
+		t.Fatal("expected non-modified rule for secret")
 	}
 	if !foundEmail {
-		t.Fatal("expected generator for email format")
+		t.Fatal("expected non-modified rule for email")
 	}
-	if !foundIDGen {
-		t.Fatal("expected generator for id")
+	if !foundID {
+		t.Fatal("expected non-modified rule for id")
 	}
 }
 
 func TestInferRuleSetEmpty(t *testing.T) {
-	cfg := InferRuleSet([]ingest.Record{})
+	cfg := InferRuleSet(ingest.Dataset{})
 	if cfg == nil || len(cfg.Tables) != 0 {
 		t.Fatalf("expected empty config for no records, got %+v", cfg)
 	}

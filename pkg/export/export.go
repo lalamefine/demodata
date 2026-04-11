@@ -14,7 +14,7 @@ import (
 
 // Exporter gère l'export des données vers différents formats.
 type Exporter interface {
-	Export(records []ingest.Record) ([]byte, error)
+	Export(dataset ingest.Dataset) ([]byte, error)
 	Destination() string
 }
 
@@ -26,7 +26,8 @@ type CSVExporter struct {
 func (e *CSVExporter) Destination() string {
 	return e.DestinationPath
 }
-func (e *CSVExporter) Export(records []ingest.Record) ([]byte, error) {
+func (e *CSVExporter) Export(dataset ingest.Dataset) ([]byte, error) {
+	records := firstTableRecords(dataset)
 	if len(records) == 0 {
 		return []byte{}, nil
 	}
@@ -66,7 +67,8 @@ func (e *JSONExporter) Destination() string {
 	return e.DestinationPath
 }
 
-func (e *JSONExporter) Export(records []ingest.Record) ([]byte, error) {
+func (e *JSONExporter) Export(dataset ingest.Dataset) ([]byte, error) {
+	records := firstTableRecords(dataset)
 	return json.MarshalIndent(records, "", "  ")
 }
 
@@ -79,31 +81,45 @@ func (e *XLSXExporter) Destination() string {
 	return e.DestinationPath
 }
 
-func (e *XLSXExporter) Export(records []ingest.Record) ([]byte, error) {
-	if len(records) == 0 {
+func (e *XLSXExporter) Export(dataset ingest.Dataset) ([]byte, error) {
+	file := excelize.NewFile()
+
+	defaultSheet := file.GetSheetName(file.GetActiveSheetIndex())
+	if defaultSheet == "" {
+		defaultSheet = "Sheet1"
+	}
+	if len(dataset) == 0 {
 		return []byte{}, nil
 	}
 
-	headers := collectHeaders(records)
-	file := excelize.NewFile()
-	sheet := file.GetSheetName(file.GetActiveSheetIndex())
-	if sheet == "" {
-		sheet = "Sheet1"
-	}
+	sheetNames := sortedTableNames(dataset)
+	for i, sheet := range sheetNames {
+		records := dataset[sheet]
+		targetSheet := sheet
+		if targetSheet == "" {
+			targetSheet = fmt.Sprintf("Sheet%d", i+1)
+		}
+		if i == 0 {
+			file.SetSheetName(defaultSheet, targetSheet)
+		} else {
+			file.NewSheet(targetSheet)
+		}
 
-	// En-tête
-	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		file.SetCellValue(sheet, cell, h)
-	}
-
-	// Lignes
-	for ri, rec := range records {
+		headers := collectHeaders(records)
 		for ci, h := range headers {
-			cell, _ := excelize.CoordinatesToCellName(ci+1, ri+2)
-			file.SetCellValue(sheet, cell, rec[h])
+			cell, _ := excelize.CoordinatesToCellName(ci+1, 1)
+			file.SetCellValue(targetSheet, cell, h)
+		}
+
+		for ri, rec := range records {
+			for ci, h := range headers {
+				cell, _ := excelize.CoordinatesToCellName(ci+1, ri+2)
+				file.SetCellValue(targetSheet, cell, rec[h])
+			}
 		}
 	}
+
+	file.SetActiveSheet(0)
 
 	buf := &bytes.Buffer{}
 	if err := file.Write(buf); err != nil {
@@ -156,7 +172,7 @@ func valueToString(v interface{}) string {
 
 // ExportToFile enregistre le résultat de l'export dans un fichier.
 // Le format doit être l'un de : "csv", "json", "xlsx".
-func ExportToFile(records []ingest.Record, path, format string) error {
+func ExportToFile(dataset ingest.Dataset, path, format string) error {
 	var exporter Exporter
 	switch format {
 	case "csv":
@@ -169,10 +185,27 @@ func ExportToFile(records []ingest.Record, path, format string) error {
 		return fmt.Errorf("format non supporté: %s", format)
 	}
 
-	b, err := exporter.Export(records)
+	b, err := exporter.Export(dataset)
 	if err != nil {
 		return err
 	}
 
 	return os.WriteFile(path, b, 0o644)
+}
+
+func firstTableRecords(dataset ingest.Dataset) []ingest.Record {
+	if len(dataset) == 0 {
+		return nil
+	}
+	names := sortedTableNames(dataset)
+	return dataset[names[0]]
+}
+
+func sortedTableNames(dataset ingest.Dataset) []string {
+	names := make([]string, 0, len(dataset))
+	for name := range dataset {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

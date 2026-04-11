@@ -13,10 +13,11 @@ func TestLoadCSV(t *testing.T) {
 1,Alice,30,true
 2,Bob,25,false
 `
-	recs, err := LoadCSV(strings.NewReader(csv))
+	ds, err := LoadCSV(strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("LoadCSV failed: %v", err)
 	}
+	recs := ds[DefaultTableName]
 	if len(recs) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(recs))
 	}
@@ -36,10 +37,11 @@ func TestLoadJSON(t *testing.T) {
   {"id": 1, "name": "Alice", "age": 30, "active": true},
   {"id": 2, "name": "Bob", "age": 25, "active": false}
 ]`
-	recs, err := LoadJSON(strings.NewReader(jsonData))
+	ds, err := LoadJSON(strings.NewReader(jsonData))
 	if err != nil {
 		t.Fatalf("LoadJSON failed: %v", err)
 	}
+	recs := ds[DefaultTableName]
 	if len(recs) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(recs))
 	}
@@ -78,10 +80,11 @@ func TestLoadXLSX(t *testing.T) {
 		t.Fatalf("failed to write xlsx buffer: %v", err)
 	}
 
-	recs, err := LoadXLSX(&buf)
+	ds, err := LoadXLSX(&buf)
 	if err != nil {
 		t.Fatalf("LoadXLSX failed: %v", err)
 	}
+	recs := ds["Sheet1"]
 	if len(recs) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(recs))
 	}
@@ -96,20 +99,22 @@ func TestLoadXLSX(t *testing.T) {
 func TestLoadWrapper(t *testing.T) {
 	// CSV
 	csv := "id,name,age\n1,Alice,30\n"
-	recs, err := Load(strings.NewReader(csv), "csv")
+	ds, err := Load(strings.NewReader(csv), "csv")
 	if err != nil {
 		t.Fatalf("Load csv failed: %v", err)
 	}
+	recs := ds[DefaultTableName]
 	if len(recs) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(recs))
 	}
 
 	// JSON
 	jsonData := `[{"id":1,"name":"Bob","age":25}]`
-	recs, err = Load(strings.NewReader(jsonData), "json")
+	ds, err = Load(strings.NewReader(jsonData), "json")
 	if err != nil {
 		t.Fatalf("Load json failed: %v", err)
 	}
+	recs = ds[DefaultTableName]
 	if len(recs) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(recs))
 	}

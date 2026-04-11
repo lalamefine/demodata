@@ -1,10 +1,13 @@
 package ui
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,32 +27,48 @@ import (
 )
 
 type uiState struct {
-	filePath      string
-	records       []ingest.Record
-	ruleConfig    *config.Config
-	selectedIndex int
+	inputFilePath  string
+	outputFilePath string
+	inputFormat    string
+	dataset        ingest.Dataset
+	selectedTable  string
+	db             *sql.DB
+	dbDriver       string
+	ruleConfig     *config.Config
+	selectedIndex  int
+	selectedRule   *config.TransformerConfig
 
 	rules                *widget.List
+	tableSelect          *widget.Select
 	columnEntry          *widget.Entry
 	typeSelect           *widget.Select
 	formatEntry          *widget.Entry
 	valuesEntry          *widget.Entry
 	statusLabel          *widget.Label
 	split                *container.Split
+	rightBotContainer    *fyne.Container
 	resizeMonitorStarted bool
 }
 
 // Start démarre l'interface utilisateur.
-func Start(filepath *os.File) error {
-	a := app.New()
+func Start(inputFilePath *os.File) error {
+	a := app.NewWithID("github.com.triboulin.demodata")
 	w := a.NewWindow("Data Mixer Dev Tool")
 	w.Resize(fyne.NewSize(600, 300))
 
 	state := &uiState{selectedIndex: -1}
 
-	w.SetContent(initialContent(w, state))
-	if filepath != nil {
-		loadDataset(w, state, filepath, filepath.Name(), widget.NewLabel("Loading initial file..."))
+	initialStatus := widget.NewLabel("Please select a dataset file or connect to a database")
+	w.SetContent(initialContent(w, state, initialStatus))
+	if inputFilePath != nil {
+		explodedInputFilePath := strings.Split(inputFilePath.Name(), ".")
+		defaultOutputPath := strings.Join(explodedInputFilePath[:len(explodedInputFilePath)-1], ".") + "_out." + explodedInputFilePath[len(explodedInputFilePath)-1]
+		state.outputFilePath = defaultOutputPath
+		state.inputFormat = strings.TrimPrefix(filepath.Ext(inputFilePath.Name()), ".")
+		a.Lifecycle().SetOnStarted(func() {
+			initialStatus.SetText("Loading initial file...")
+			loadDataset(w, state, inputFilePath, inputFilePath.Name(), initialStatus)
+		})
 	} else {
 		w.SetOnDropped(func(position fyne.Position, uris []fyne.URI) {
 			if len(uris) == 0 {
@@ -70,7 +89,6 @@ func Start(filepath *os.File) error {
 			if err != nil {
 				return
 			}
-			defer f.Close()
 
 			loadDataset(w, state, f, path, widget.NewLabel("Dropped file loading..."))
 		})
@@ -81,52 +99,130 @@ func Start(filepath *os.File) error {
 	return nil
 }
 
-func initialContent(w fyne.Window, state *uiState) fyne.CanvasObject {
+func initialContent(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObject {
 	fileEntry := widget.NewEntry()
 	fileEntry.SetPlaceHolder("Select input file")
 
-	status := widget.NewLabel("Please select or drag & drop a dataset file (CSV/JSON/XLSX)")
 	openBtn := widget.NewButton("Open input file", func() {
 		dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil || reader == nil {
 				return
 			}
-			defer reader.Close()
 			path := reader.URI().Path()
 			fileEntry.SetText(path)
 			loadDataset(w, state, reader, path, status)
 		}, w)
 	})
 
+	connectDBBtn := widget.NewButton("Connect to database", func() {
+		driverSelect := widget.NewSelect([]string{"sqlite", "mysql", "pgx"}, func(string) {})
+		driverSelect.SetSelected("sqlite")
+		dsnEntry := widget.NewEntry()
+		dsnEntry.SetPlaceHolder(":memory: or /path/db.sqlite or DSN")
+
+		form := container.NewVBox(
+			widget.NewLabel("Driver"),
+			driverSelect,
+			widget.NewLabel("DSN"),
+			dsnEntry,
+		)
+
+		dlg := dialog.NewCustomConfirm("Database connection", "Connect", "Cancel", form, func(ok bool) {
+			if !ok {
+				return
+			}
+			if strings.TrimSpace(dsnEntry.Text) == "" {
+				status.SetText("DSN is required")
+				return
+			}
+
+			status.SetText("Connecting to database...")
+			go func() {
+				db, err := ingest.OpenDB(driverSelect.Selected, strings.TrimSpace(dsnEntry.Text))
+				if err != nil {
+					fyne.Do(func() { status.SetText("Connection error: " + err.Error()) })
+					return
+				}
+
+				tables, err := ingest.ListTables(db, driverSelect.Selected)
+				if err != nil {
+					_ = db.Close()
+					fyne.Do(func() { status.SetText("Table listing error: " + err.Error()) })
+					return
+				}
+
+				dataset, err := ingest.LoadDB(db, driverSelect.Selected, tables)
+				if err != nil {
+					_ = db.Close()
+					fyne.Do(func() { status.SetText("Load error: " + err.Error()) })
+					return
+				}
+
+				fyne.Do(func() {
+					if state.db != nil {
+						_ = state.db.Close()
+					}
+					state.db = db
+					state.dbDriver = driverSelect.Selected
+					state.dataset = dataset
+					state.inputFormat = "db"
+					state.ruleConfig = inferer.InferRuleSet(dataset)
+					state.selectedIndex = -1
+					state.selectedTable = firstTableName(dataset)
+					w.Resize(fyne.NewSize(1250, 760))
+					w.SetContent(mainUI(w, state, status))
+					status.SetText(fmt.Sprintf("Connected: %d tables loaded", len(dataset)))
+				})
+			}()
+		}, w)
+		dlg.Show()
+	})
+
 	return container.NewVBox(
 		openBtn,
+		connectDBBtn,
 		status,
 	)
 }
 
-func loadDataset(w fyne.Window, state *uiState, reader io.Reader, path string, status *widget.Label) {
-	state.filePath = path
-	status.SetText("Loading file...")
-
+func loadDataset(w fyne.Window, state *uiState, reader io.ReadCloser, path string, status *widget.Label) {
 	format := filepath.Ext(path)
 	if len(format) > 0 {
 		format = format[1:]
 	}
 
-	recs, loadErr := ingest.Load(reader, format)
-	if loadErr != nil {
-		status.SetText("Load error: " + loadErr.Error())
-		return
-	}
+	fyne.Do(func() {
+		state.inputFilePath = path
+		status.SetText("Loading file...")
+		state.dataset = nil
+		state.db = nil
+		state.dbDriver = ""
+		state.ruleConfig = nil
+		state.selectedIndex = -1
+		state.rules = nil
+		state.inputFormat = format
+	})
 
-	state.records = recs
-	state.ruleConfig = inferer.InferRuleSet(recs)
-	state.selectedIndex = -1
+	go func() {
+		defer reader.Close()
+		dataset, loadErr := ingest.Load(reader, format)
+		fyne.Do(func() {
+			if loadErr != nil {
+				status.SetText("Load error: " + loadErr.Error())
+				return
+			}
 
-	state.rules = nil
+			state.dataset = dataset
+			state.ruleConfig = inferer.InferRuleSet(dataset)
+			state.selectedTable = firstTableName(dataset)
+			state.selectedIndex = -1
+			state.rules = nil
 
-	w.Resize(fyne.NewSize(1250, 760))
-	w.SetContent(mainUI(w, state, status))
+			w.Resize(fyne.NewSize(1250, 760))
+			w.SetContent(mainUI(w, state, status))
+			status.SetText("Loaded " + filepath.Base(path))
+		})
+	}()
 }
 
 func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObject {
@@ -134,26 +230,110 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		status.SetText("No inferred rules available")
 	}
 	w.Resize(fyne.NewSize(1200, 760))
+
+	state.columnEntry = widget.NewEntry()
+	state.columnEntry.SetPlaceHolder("column_name")
+
+	state.typeSelect = widget.NewSelect([]string{"none", "masker", "shuffler", "generator"}, func(string) {})
+	state.typeSelect.PlaceHolder = "rule type"
+
+	state.formatEntry = widget.NewEntry()
+	state.formatEntry.SetPlaceHolder("format (regex)")
+
+	state.valuesEntry = widget.NewMultiLineEntry()
+	state.valuesEntry.SetPlaceHolder("values as JSON array or empty")
+
+	state.statusLabel = status
+
+	left := leftPane(w, state, status)
+	rtop := topRight(w, state, status)
+	rbot := bottomRight(w, state, status)
+	state.rightBotContainer = container.NewStack(rbot)
+
+	// Rafraîchit uniquement le panneau bas-droit lors de la sélection d'une règle.
+	prevOnSelected := state.rules.OnSelected
+	state.rules.OnSelected = func(id widget.ListItemID) {
+		prevOnSelected(id)
+		state.rightBotContainer.Objects = []fyne.CanvasObject{bottomRight(w, state, status)}
+		state.rightBotContainer.Refresh()
+	}
+
+	right := container.NewBorder(
+		container.NewVBox(rtop, widget.NewSeparator()),
+		nil, nil, nil,
+		state.rightBotContainer,
+	)
+
+	// Compute ideal left-panel width: fit longest list label, capped at 50% of window width.
+	windowWidth := w.Canvas().Size().Width
+	if windowWidth <= 0 {
+		windowWidth = 1200
+	}
+	idealWidth := float32(160) // minimum fallback
+	tableCfg := tableConfigForSelected(state)
+	if tableCfg != nil {
+		for i, t := range tableCfg.Transformers {
+			lbl := widget.NewLabel(fmt.Sprintf("%d. %s (%s)", i+1, t.Name, t.Type))
+			if needed := lbl.MinSize().Width + 48; needed > idealWidth { // 48 = list padding + scrollbar
+				idealWidth = needed
+			}
+		}
+	}
+	if max := windowWidth / 3; idealWidth > max {
+		idealWidth = max
+	}
+
+	split := container.NewHSplit(left, right)
+	state.split = split
+	if !state.resizeMonitorStarted {
+		state.resizeMonitorStarted = true
+		go watchWindowResize(w, state)
+	}
+	split.SetOffset(idealLeftOffset(windowWidth, idealWidth))
+	return split
+}
+
+func leftPane(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObject {
+
+	tableNames := sortedTableNames(state.dataset)
+	state.tableSelect = widget.NewSelect(tableNames, func(selected string) {
+		if selected == state.selectedTable {
+			return
+		}
+		state.selectedTable = selected
+		state.selectedIndex = -1
+		w.SetContent(mainUI(w, state, status))
+	})
+	if state.selectedTable != "" {
+		state.tableSelect.SetSelected(state.selectedTable)
+	}
 	state.rules = widget.NewList(
 		func() int {
-			if state.ruleConfig == nil || len(state.ruleConfig.Tables) == 0 {
+			tableCfg := tableConfigForSelected(state)
+			if tableCfg == nil {
 				return 0
 			}
-			return len(state.ruleConfig.Tables[0].Transformers)
+			return len(tableCfg.Transformers)
 		},
-		func() fyne.CanvasObject { return widget.NewLabel("rule") },
+		func() fyne.CanvasObject { return widget.NewLabel("column") },
 		func(i widget.ListItemID, o fyne.CanvasObject) {
-			if state.ruleConfig == nil || len(state.ruleConfig.Tables) == 0 {
+			tableCfg := tableConfigForSelected(state)
+			if tableCfg == nil {
 				return
 			}
-			r := state.ruleConfig.Tables[0].Transformers[i]
-			o.(*widget.Label).SetText(fmt.Sprintf("%d. %s (%s)", i+1, r.Name, r.Type))
+			r := tableCfg.Transformers[i]
+			o.(*widget.Label).SetText(r.Name)
 		},
 	)
 
 	state.rules.OnSelected = func(id widget.ListItemID) {
+		tableCfg := tableConfigForSelected(state)
+		if tableCfg == nil || id < 0 || id >= len(tableCfg.Transformers) {
+			return
+		}
 		state.selectedIndex = id
-		r := state.ruleConfig.Tables[0].Transformers[id]
+		r := tableCfg.Transformers[id]
+		state.selectedRule = &r
 		state.columnEntry.SetText(fmt.Sprint(r.Options["column_name"]))
 		state.typeSelect.SetSelected(r.Type)
 		state.formatEntry.SetText(fmt.Sprint(r.Options["format"]))
@@ -165,27 +345,96 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		}
 	}
 
-	state.columnEntry = widget.NewEntry()
-	state.columnEntry.SetPlaceHolder("column_name")
+	if len(tableNames) > 1 {
+		top := container.NewVBox(
+			widget.NewLabel("Table"),
+			state.tableSelect,
+			widget.NewSeparator(),
+		)
+		return container.NewBorder(top, nil, nil, nil, state.rules)
+	} else {
+		return state.rules
+	}
 
-	state.typeSelect = widget.NewSelect([]string{"sampler", "masker", "shuffler", "generator"}, func(string) {})
-	state.typeSelect.PlaceHolder = "rule type"
+}
 
-	state.formatEntry = widget.NewEntry()
-	state.formatEntry.SetPlaceHolder("format (regex)")
+func topRight(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObject {
+	displayedOutputFileName := path.Base(state.outputFilePath)
+	if displayedOutputFileName == "." || displayedOutputFileName == "" {
+		displayedOutputFileName = "Select output file"
+	}
+	var chooseOutputBtn *widget.Button
+	chooseOutputBtn = widget.NewButton(displayedOutputFileName, func() {
+		dialog.ShowFileSave(func(uri fyne.URIWriteCloser, err error) {
+			if err != nil || uri == nil {
+				return
+			}
+			state.outputFilePath = uri.URI().Path()
+			uri.Close()
+			displayedOutputFileNameSl := strings.Split(state.outputFilePath, string(os.PathSeparator))
+			displayedOutputFileName := displayedOutputFileNameSl[len(displayedOutputFileNameSl)-1]
+			chooseOutputBtn.SetText(displayedOutputFileName)
+		}, w)
+	})
 
-	state.valuesEntry = widget.NewMultiLineEntry()
-	state.valuesEntry.SetPlaceHolder("values as JSON array or empty")
+	runBtn := widget.NewButton(">", func() {
+		if state.ruleConfig == nil || state.dataset == nil {
+			status.SetText("Load data first")
+			return
+		}
 
+		target := transform.ApplyRules(copyDataset(state.dataset), state.ruleConfig, 42)
+		if state.db != nil {
+			if err := export.ExportToDB(state.db, target, state.dbDriver); err != nil {
+				status.SetText("DB export error: " + err.Error())
+				return
+			}
+			status.SetText("DB export successful")
+			return
+		}
+
+		outFormat := strings.TrimPrefix(filepath.Ext(state.outputFilePath), ".")
+		if outFormat == "" {
+			status.SetText("Output extension required")
+			return
+		}
+		if state.inputFormat != "" && outFormat != state.inputFormat {
+			status.SetText("Output format must match input format")
+			return
+		}
+		if err := export.ExportToFile(target, state.outputFilePath, outFormat); err != nil {
+			status.SetText("Export error: " + err.Error())
+			return
+		}
+		status.SetText("Export successful: " + state.outputFilePath)
+	})
+
+	if state.db != nil {
+		return container.NewHBox(
+			widget.NewLabel("Output"),
+			widget.NewLabel("Database (in place)"),
+			runBtn,
+		)
+	}
+
+	return container.NewHBox(
+		widget.NewLabel("Output"),
+		chooseOutputBtn,
+		runBtn,
+	)
+}
+
+func bottomRight(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObject {
 	saveRuleBtn := widget.NewButton("Save rule", func() {
-		if state.selectedIndex < 0 || state.ruleConfig == nil || len(state.ruleConfig.Tables) == 0 {
+		tableCfg := tableConfigForSelected(state)
+		if state.selectedIndex < 0 || tableCfg == nil {
 			status.SetText("Select a rule first")
 			return
 		}
 
-		r := &state.ruleConfig.Tables[0].Transformers[state.selectedIndex]
+		r := &tableCfg.Transformers[state.selectedIndex]
 		r.Type = state.typeSelect.Selected
-		r.Name = fmt.Sprintf("%s_%s", r.Type, state.columnEntry.Text)
+		r.Name = fmt.Sprintf("%s - %s", state.columnEntry.Text, r.Type)
 		if r.Options == nil {
 			r.Options = map[string]any{}
 		}
@@ -208,150 +457,28 @@ func mainUI(w fyne.Window, state *uiState, status *widget.Label) fyne.CanvasObje
 		w.SetContent(mainUI(w, state, status))
 	})
 
-	saveConfigBtn := widget.NewButton("Save ruleset config", func() {
-		dialog.ShowFileSave(func(uri fyne.URIWriteCloser, err error) {
-			if err != nil || uri == nil {
-				return
-			}
-			defer uri.Close()
-			b, err := json.MarshalIndent(state.ruleConfig, "", "  ")
-			if err != nil {
-				status.SetText("Error serializing config: " + err.Error())
-				return
-			}
-			if err := os.WriteFile(uri.URI().Path(), b, 0644); err != nil {
-				status.SetText("Error writing config: " + err.Error())
-				return
-			}
-			status.SetText("Ruleset config saved: " + uri.URI().Path())
-		}, w)
-	})
-
-	outputEntry := widget.NewEntry()
-	outputEntry.SetPlaceHolder("output file path")
-
-	chooseOutputBtn := widget.NewButton("Choose output file", func() {
-		dialog.ShowFileSave(func(uri fyne.URIWriteCloser, err error) {
-			if err != nil || uri == nil {
-				return
-			}
-			outputEntry.SetText(uri.URI().Path())
-			uri.Close()
-		}, w)
-	})
-
-	applyBtn := widget.NewButton("Apply rules and export", func() {
-		if state.ruleConfig == nil || state.records == nil {
-			status.SetText("Load data first")
-			return
-		}
-		if outputEntry.Text == "" {
-			status.SetText("Choose output file first")
-			return
-		}
-
-		target := transform.ApplyRules(append([]ingest.Record(nil), state.records...), state.ruleConfig, 42)
-		outFormat := strings.TrimPrefix(filepath.Ext(outputEntry.Text), ".")
-		if outFormat == "" {
-			status.SetText("Output extension required")
-			return
-		}
-		if err := export.ExportToFile(target, outputEntry.Text, outFormat); err != nil {
-			status.SetText("Export error: " + err.Error())
-			return
-		}
-		status.SetText("Export successful: " + outputEntry.Text)
-	})
-
-	state.statusLabel = status
-
-	addRuleBtn := widget.NewButton("Add rule", func() {
-		if state.ruleConfig == nil {
-			state.ruleConfig = &config.Config{Tables: []config.TableConfig{{Name: "default", Transformers: []config.TransformerConfig{}}}}
-		}
-
-		if len(state.ruleConfig.Tables) == 0 {
-			state.ruleConfig.Tables = append(state.ruleConfig.Tables, config.TableConfig{Name: "default", Transformers: []config.TransformerConfig{}})
-		}
-
-		newRule := config.TransformerConfig{
-			Name:    "new_rule",
-			Type:    "sampler",
-			Options: map[string]any{"column_name": "", "format": "", "values": []any{}},
-		}
-		state.ruleConfig.Tables[0].Transformers = append(state.ruleConfig.Tables[0].Transformers, newRule)
-		state.selectedIndex = len(state.ruleConfig.Tables[0].Transformers) - 1
-		state.rules.Refresh()
-
-		// Rebuild main UI to reflect state changes
-		w.SetContent(mainUI(w, state, status))
-	})
-
-	left := container.NewBorder(
-		widget.NewLabel("Rules"),
-		container.NewVBox(saveConfigBtn, addRuleBtn),
-		nil, nil,
-		state.rules,
-	)
-
-	var r1 *fyne.Container
 	if state.selectedIndex < 0 {
-		r1 = container.NewVBox(
+		return container.NewVBox(
 			widget.NewLabel("Rule editor"),
 			widget.NewLabel("Select a rule on the left"),
 		)
-	} else {
-		r1 = container.NewVBox(
-			widget.NewLabel("Rule editor"),
-			widget.NewLabel("Column name"),
-			state.columnEntry,
-			widget.NewLabel("Rule type"),
-			state.typeSelect,
-			widget.NewLabel("Format / regex"),
-			state.formatEntry,
-			widget.NewLabel("Values (JSON array)"),
-			state.valuesEntry,
-			saveRuleBtn,
-		)
 	}
-	r2 := container.NewVBox(
-		widget.NewLabel("Output"),
-		outputEntry,
-		chooseOutputBtn,
-		applyBtn,
-		state.statusLabel,
+
+	return container.NewVBox(
+		widget.NewLabel("Rule editor"),
+		widget.NewLabel("Column name"),
+		state.columnEntry,
+		widget.NewLabel("Rule type"),
+		state.typeSelect,
+		widget.NewLabel("Format / regex"),
+		state.formatEntry,
+		widget.NewLabel("Values (JSON array)"),
+		state.valuesEntry,
+		saveRuleBtn,
 	)
-	right := container.NewVSplit(r1, r2)
-
-	// Compute ideal left-panel width: fit longest list label, capped at 50% of window width.
-	windowWidth := w.Canvas().Size().Width
-	if windowWidth <= 0 {
-		windowWidth = 1200
-	}
-	idealWidth := float32(160) // minimum fallback
-	if state.ruleConfig != nil && len(state.ruleConfig.Tables) > 0 {
-		for i, t := range state.ruleConfig.Tables[0].Transformers {
-			lbl := widget.NewLabel(fmt.Sprintf("%d. %s (%s)", i+1, t.Name, t.Type))
-			if needed := lbl.MinSize().Width + 48; needed > idealWidth { // 48 = list padding + scrollbar
-				idealWidth = needed
-			}
-		}
-	}
-	if max := windowWidth / 3; idealWidth > max {
-		idealWidth = max
-	}
-
-	split := container.NewHSplit(left, right)
-	state.split = split
-	if !state.resizeMonitorStarted {
-		state.resizeMonitorStarted = true
-		go watchWindowResize(w, state)
-	}
-	split.SetOffset(idealLeftOffset(w, state, windowWidth, idealWidth))
-	return split
 }
 
-func idealLeftOffset(w fyne.Window, state *uiState, windowWidth, idealWidth float32) float64 {
+func idealLeftOffset(windowWidth, idealWidth float32) float64 {
 	if windowWidth <= 0 {
 		return 1.0 / 3.0
 	}
@@ -372,8 +499,9 @@ func watchWindowResize(w fyne.Window, state *uiState) {
 		}
 		windowWidth := size.Width
 		idealWidth := float32(160)
-		if state.ruleConfig != nil && len(state.ruleConfig.Tables) > 0 {
-			for i, t := range state.ruleConfig.Tables[0].Transformers {
+		tableCfg := tableConfigForSelected(state)
+		if tableCfg != nil {
+			for i, t := range tableCfg.Transformers {
 				lbl := widget.NewLabel(fmt.Sprintf("%d. %s (%s)", i+1, t.Name, t.Type))
 				if needed := lbl.MinSize().Width + 48; needed > idealWidth {
 					idealWidth = needed
@@ -390,4 +518,49 @@ func watchWindowResize(w fyne.Window, state *uiState) {
 			}
 		})
 	}
+}
+
+func sortedTableNames(dataset ingest.Dataset) []string {
+	names := make([]string, 0, len(dataset))
+	for name := range dataset {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func firstTableName(dataset ingest.Dataset) string {
+	names := sortedTableNames(dataset)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func tableConfigForSelected(state *uiState) *config.TableConfig {
+	if state == nil || state.ruleConfig == nil {
+		return nil
+	}
+	for i := range state.ruleConfig.Tables {
+		if state.ruleConfig.Tables[i].Name == state.selectedTable {
+			return &state.ruleConfig.Tables[i]
+		}
+	}
+	return nil
+}
+
+func copyDataset(in ingest.Dataset) ingest.Dataset {
+	out := make(ingest.Dataset, len(in))
+	for table, records := range in {
+		copied := make([]ingest.Record, len(records))
+		for i := range records {
+			clone := make(ingest.Record, len(records[i]))
+			for k, v := range records[i] {
+				clone[k] = v
+			}
+			copied[i] = clone
+		}
+		out[table] = copied
+	}
+	return out
 }

@@ -11,7 +11,7 @@ func TestCSVExporter(t *testing.T) {
 		{"id": int64(1), "name": "Alice", "age": int64(30)},
 		{"id": int64(2), "name": "Bob", "age": int64(25)},
 	}
-	b, err := (&CSVExporter{}).Export(recs)
+	b, err := (&CSVExporter{}).Export(ingest.Dataset{"default": recs})
 	if err != nil {
 		t.Fatalf("CSV export failed: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestJSONExporter(t *testing.T) {
 	recs := []ingest.Record{
 		{"id": int64(1), "name": "Alice"},
 	}
-	b, err := (&JSONExporter{}).Export(recs)
+	b, err := (&JSONExporter{}).Export(ingest.Dataset{"default": recs})
 	if err != nil {
 		t.Fatalf("JSON export failed: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestXLSXExporter(t *testing.T) {
 		{"id": int64(1), "name": "Alice", "age": int64(30)},
 		{"id": int64(2), "name": "Bob", "age": int64(25)},
 	}
-	b, err := (&XLSXExporter{}).Export(recs)
+	b, err := (&XLSXExporter{}).Export(ingest.Dataset{"sheet_a": recs})
 	if err != nil {
 		t.Fatalf("XLSX export failed: %v", err)
 	}

@@ -30,15 +30,38 @@ func (t *Transformer) Apply(records []ingest.Record) []ingest.Record {
 }
 
 // ApplyRules est une fonction utilitaire pour appliquer des règles à un jeu de données.
-func ApplyRules(records []ingest.Record, config *config.Config, seed int64) []ingest.Record {
-	r := rand.New(rand.NewSource(seed))
+func ApplyRules(dataset ingest.Dataset, config *config.Config, seed int64) ingest.Dataset {
+	if config == nil {
+		return dataset
+	}
+	if dataset == nil {
+		return ingest.Dataset{}
+	}
+	out := make(ingest.Dataset, len(dataset))
+	for tableName, records := range dataset {
+		copied := make([]ingest.Record, len(records))
+		copy(copied, records)
+		out[tableName] = copied
+	}
 
-	transformer := &Transformer{}
-	var shufflers []*Shuffler
-	for _, table := range config.Tables {
+	for i, table := range config.Tables {
+		tableName := table.Name
+		if tableName == "" {
+			tableName = ingest.DefaultTableName
+		}
+		records, ok := out[tableName]
+		if !ok {
+			continue
+		}
+
+		r := rand.New(rand.NewSource(seed + int64(i)))
+		transformer := &Transformer{}
+		var shufflers []*Shuffler
 		for _, tconf := range table.Transformers {
 			var rule Rule
 			switch strings.ToLower(tconf.Type) {
+			case "none", "noop", "unchanged":
+				continue
 			case "masker":
 				col, _ := tconf.Options["column_name"].(string)
 				maskChar, ok := tconf.Options["mask_char"].(string)
@@ -55,18 +78,6 @@ func ApplyRules(records []ingest.Record, config *config.Config, seed int64) []in
 				dataType, _ := tconf.Options["data_type"].(string)
 				formatRegex, _ := tconf.Options["format"].(string)
 				rule = &Generator{Column: col, DataType: strings.ToLower(dataType), Regex: formatRegex, Rand: r}
-			case "sampler":
-				col, _ := tconf.Options["column_name"].(string)
-				var values []any
-				if v, ok := tconf.Options["values"].([]any); ok {
-					values = v
-				} else if v, ok := tconf.Options["values"].([]any); ok {
-					values = make([]any, len(v))
-					for i, vv := range v {
-						values[i] = vv
-					}
-				}
-				rule = &Sampler{Column: col, Values: values, Rand: r}
 			default:
 				continue
 			}
@@ -76,14 +87,14 @@ func ApplyRules(records []ingest.Record, config *config.Config, seed int64) []in
 				}
 			}
 		}
+
+		for _, s := range shufflers {
+			records = ShuffleRecords(records, s.ColumnNames, s.Rand)
+		}
+		out[tableName] = transformer.Apply(records)
 	}
 
-	// Appliquer d'abord le shuffle de colonnes (conserve le bloc de colonnes par enregistrement)
-	for _, s := range shufflers {
-		records = ShuffleRecords(records, s.ColumnNames, s.Rand)
-	}
-	// TODO: Charger les règles à partir de la config
-	return transformer.Apply(records)
+	return out
 }
 
 // Masker remplace une valeur de colonne par un masque de type string.
@@ -241,25 +252,4 @@ func randomString(length int, r *rand.Rand) string {
 		sb.WriteByte(letters[r.Intn(len(letters))])
 	}
 	return sb.String()
-}
-
-// Sampler génère une valeur en tirant au hasard parmi les valeurs observées (aucune nouvelle valeur).
-type Sampler struct {
-	Column string
-	Values []any
-	Rand   *rand.Rand
-}
-
-func (s *Sampler) Apply(records []ingest.Record) []ingest.Record {
-	if len(s.Values) == 0 {
-		return records
-	}
-	if s.Rand == nil {
-		s.Rand = rand.New(rand.NewSource(0))
-	}
-
-	for i := range records {
-		records[i][s.Column] = s.Values[s.Rand.Intn(len(s.Values))]
-	}
-	return records
 }

@@ -17,42 +17,55 @@ var (
 )
 
 // InferRuleSet construit une config à partir d'un jeu d'enregistrements.
-func InferRuleSet(records []ingest.Record) *config.Config {
-	if len(records) == 0 {
+func InferRuleSet(dataset ingest.Dataset) *config.Config {
+	if len(dataset) == 0 {
 		return &config.Config{Tables: nil}
 	}
-	// Détection de schéma par colonnes
-	cols := detectColumns(records)
 
-	table := config.TableConfig{Name: "default", Transformers: []config.TransformerConfig{}}
+	tableNames := make([]string, 0, len(dataset))
+	for tableName := range dataset {
+		tableNames = append(tableNames, tableName)
+	}
+	sort.Strings(tableNames)
 
-	for col, st := range cols {
-		values := collectDistinct(records, col)
-		if len(values) == 0 {
+	tables := make([]config.TableConfig, 0, len(tableNames))
+	for _, tableName := range tableNames {
+		records := dataset[tableName]
+		if len(records) == 0 {
+			tables = append(tables, config.TableConfig{Name: tableName, Transformers: []config.TransformerConfig{}})
 			continue
 		}
 
-		regex := inferRegex(col, values)
+		cols := detectColumns(records)
+		table := config.TableConfig{Name: tableName, Transformers: []config.TransformerConfig{}}
+		for col, st := range cols {
+			values := collectDistinct(records, col)
+			if len(values) == 0 {
+				continue
+			}
 
-		rule := config.TransformerConfig{
-			Type: "sampler",
-			Name: fmt.Sprintf("sampler_%s", col),
-			Options: map[string]any{
-				"column_name": col,
-				"values":      values,
-				"format":      regex,
-			},
+			regex := inferRegex(col, values)
+			rule := config.TransformerConfig{
+				Type: "none",
+				Name: fmt.Sprintf("%s - none", col),
+				Options: map[string]any{
+					"column_name": col,
+					"values":      values,
+					"format":      regex,
+				},
+			}
+
+			if st == config.Integer || st == config.Float {
+				min, max, avg, std := numericStats(values)
+				rule.Options["distribution"] = map[string]any{"min": min, "max": max, "avg": avg, "std": std}
+			}
+			table.Transformers = append(table.Transformers, rule)
 		}
 
-		if st == config.Integer || st == config.Float {
-			min, max, avg, std := numericStats(values)
-			rule.Options["distribution"] = map[string]any{"min": min, "max": max, "avg": avg, "std": std}
-		}
-
-		table.Transformers = append(table.Transformers, rule)
+		tables = append(tables, table)
 	}
 
-	return &config.Config{Tables: []config.TableConfig{table}}
+	return &config.Config{Tables: tables}
 }
 
 func detectColumns(records []ingest.Record) map[string]config.DataType {

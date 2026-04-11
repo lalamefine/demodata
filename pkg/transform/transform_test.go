@@ -82,7 +82,8 @@ func TestApplyRules(t *testing.T) {
 		},
 	}}}
 
-	out := ApplyRules(recs, cfg, 42)
+	outDataset := ApplyRules(ingest.Dataset{"default": recs}, cfg, 42)
+	out := outDataset["default"]
 
 	if len(out) != 2 {
 		t.Fatalf("expected 2 output records, got %d", len(out))
