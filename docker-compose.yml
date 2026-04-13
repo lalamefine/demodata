@@ -1,0 +1,35 @@
+services:
+  mysql:
+    image: mysql:8
+    container_name: demodata-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: demo
+      MYSQL_PASSWORD: demopass
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./test/db/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "demo", "-pdemopass"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:15
+    container_name: demodata-postgres
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demopass
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./test/db/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d testdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 12

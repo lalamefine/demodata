@@ -22,6 +22,7 @@ func main() {
 	seed := flag.Int64("seed", 0, "Seed pseudo-aléatoire pour reproductibilité")
 	driver := flag.String("driver", "", "Driver BDD (sqlite|mysql|pgx|pgsql)")
 	dsn := flag.String("dsn", "", "Chaîne de connexion BDD")
+	sample := flag.Int("sample", 100, "Facteur d'échantillonnage en %% (1-100, défaut 100 = toutes les lignes)")
 	help := flag.Bool("help", false, "Afficher l'aide")
 	useUI := flag.Bool("ui", false, "Lancer l'interface graphique")
 	flag.Parse()
@@ -32,7 +33,12 @@ func main() {
 	} else if *useUI {
 		var startOnFile *os.File = nil
 		if *inputFile != "" {
-			startOnFile, _ = os.Open(*inputFile)
+			var openErr error
+			startOnFile, openErr = os.Open(*inputFile)
+			if openErr != nil {
+				fmt.Fprintf(os.Stderr, "erreur ouverture fichier : %v\n", openErr)
+				os.Exit(1)
+			}
 		}
 		if err := ui.Start(startOnFile); err != nil {
 			fmt.Fprintf(os.Stderr, "erreur ui : %v\n", err)
@@ -45,6 +51,7 @@ func main() {
 		os.Exit(1)
 	} else {
 		var dataset ingest.Dataset
+		var fileColOrder map[string][]string
 		var err error
 		var dbDriver string
 		var dbHandle *sql.DB
@@ -69,7 +76,7 @@ func main() {
 			}
 			dataset, err = ingest.LoadDB(db, dbDriver, tables)
 		} else {
-			dataset, err = ingest.LoadFile(*inputFile)
+			dataset, fileColOrder, err = ingest.LoadFile(*inputFile)
 		}
 
 		if err != nil {
@@ -90,7 +97,25 @@ func main() {
 			}
 			fmt.Printf("Configuration chargée : %d tables configurées\n", len(config.Tables))
 			dataset = transform.ApplyRules(dataset, config, *seed)
-
+			if *sample > 0 && *sample < 100 {
+				rate := float64(*sample) / 100.0
+				dataset = transform.SampleDataset(dataset, rate, *seed)
+				fmt.Printf("Échantillonnage : %d%% → %d enregistrements (%d tables)\n", *sample, countRecords(dataset), len(dataset))
+				// Filtrer les lignes orphelines pour préserver l'intégrité référentielle
+				if dbHandle != nil {
+					var tableNames []string
+					for t := range dataset {
+						tableNames = append(tableNames, t)
+					}
+					fkRels, fkErr := ingest.GetForeignKeys(dbHandle, dbDriver, tableNames)
+					if fkErr != nil {
+						fmt.Fprintf(os.Stderr, "avertissement : lecture FK impossible: %v\n", fkErr)
+					} else if len(fkRels) > 0 {
+						dataset = transform.FilterFKViolations(dataset, fkRels)
+						fmt.Printf("Après filtrage FK : %d enregistrements (%d tables)\n", countRecords(dataset), len(dataset))
+					}
+				}
+			}
 			if *dsn != "" {
 				if dbHandle == nil {
 					fmt.Fprintln(os.Stderr, "erreur : connexion bdd indisponible")
@@ -113,7 +138,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "erreur : le format de sortie (%s) doit correspondre a l'entree (%s)\n", outputFormat, inputFormat)
 				os.Exit(1)
 			}
-			if err := export.ExportToFile(dataset, *outputFile, outputFormat); err != nil {
+			if err := export.ExportToFile(dataset, *outputFile, outputFormat, fileColOrder); err != nil {
 				fmt.Fprintf(os.Stderr, "erreur d'export : %v\n", err)
 				os.Exit(1)
 			}

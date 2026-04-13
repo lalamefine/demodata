@@ -13,7 +13,7 @@ func TestLoadCSV(t *testing.T) {
 1,Alice,30,true
 2,Bob,25,false
 `
-	ds, err := LoadCSV(strings.NewReader(csv))
+	ds, _, err := LoadCSV(strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("LoadCSV failed: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestLoadJSON(t *testing.T) {
   {"id": 1, "name": "Alice", "age": 30, "active": true},
   {"id": 2, "name": "Bob", "age": 25, "active": false}
 ]`
-	ds, err := LoadJSON(strings.NewReader(jsonData))
+	ds, _, err := LoadJSON(strings.NewReader(jsonData))
 	if err != nil {
 		t.Fatalf("LoadJSON failed: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestLoadXLSX(t *testing.T) {
 		t.Fatalf("failed to write xlsx buffer: %v", err)
 	}
 
-	ds, err := LoadXLSX(&buf)
+	ds, _, err := LoadXLSX(&buf)
 	if err != nil {
 		t.Fatalf("LoadXLSX failed: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestLoadXLSX(t *testing.T) {
 func TestLoadWrapper(t *testing.T) {
 	// CSV
 	csv := "id,name,age\n1,Alice,30\n"
-	ds, err := Load(strings.NewReader(csv), "csv")
+	ds, _, err := Load(strings.NewReader(csv), "csv")
 	if err != nil {
 		t.Fatalf("Load csv failed: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestLoadWrapper(t *testing.T) {
 
 	// JSON
 	jsonData := `[{"id":1,"name":"Bob","age":25}]`
-	ds, err = Load(strings.NewReader(jsonData), "json")
+	ds, _, err = Load(strings.NewReader(jsonData), "json")
 	if err != nil {
 		t.Fatalf("Load json failed: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestLoadWrapper(t *testing.T) {
 	}
 
 	// Unsupported format
-	_, err = Load(strings.NewReader(""), "xml")
+	_, _, err = Load(strings.NewReader(""), "xml")
 	if err == nil {
 		t.Fatalf("expected error for unsupported format")
 	}

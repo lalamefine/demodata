@@ -24,14 +24,13 @@ const DefaultTableName = "default"
 
 // LoadCSV ré-hydrate un flux CSV en une liste de Records.
 // Cette fonction est un stub et doit être complétée pour gérer les dialectes CSV.
-func LoadCSV(r io.Reader) (Dataset, error) {
+func LoadCSV(r io.Reader) (Dataset, []string, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
 	// Lire l'en-tête
 	headers, err := reader.Read()
-	log.Printf("headers ignorés: %v", headers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	records := make([]Record, 0)
@@ -41,7 +40,7 @@ func LoadCSV(r io.Reader) (Dataset, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		if len(row) == 0 {
 			continue
@@ -68,22 +67,22 @@ func LoadCSV(r io.Reader) (Dataset, error) {
 		records = append(records, rec)
 	}
 
-	return Dataset{DefaultTableName: records}, nil
+	return Dataset{DefaultTableName: records}, headers, nil
 }
 
 // LoadJSON charge une liste d'objets JSON depuis un flux.
-func LoadJSON(r io.Reader) (Dataset, error) {
+func LoadJSON(r io.Reader) (Dataset, []string, error) {
 	decoder := json.NewDecoder(r)
 	decoder.UseNumber()
 
 	var raw interface{}
 	if err := decoder.Decode(&raw); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	arr, ok := raw.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("json attendu: tableau d'objets")
+		return nil, nil, fmt.Errorf("json attendu: tableau d'objets")
 	}
 
 	records := make([]Record, 0, len(arr))
@@ -99,28 +98,29 @@ func LoadJSON(r io.Reader) (Dataset, error) {
 		records = append(records, rec)
 	}
 
-	return Dataset{DefaultTableName: records}, nil
+	return Dataset{DefaultTableName: records}, nil, nil
 }
 
 // LoadXLSX lit le premier onglet d'un fichier Excel (XLSX) et en extrait une liste de Record.
 // La première ligne est interprétée comme l'en-tête des colonnes.
-func LoadXLSX(r io.Reader) (Dataset, error) {
+func LoadXLSX(r io.Reader) (Dataset, map[string][]string, error) {
 	f, err := excelize.OpenReader(r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 
 	sheets := f.GetSheetList()
 	if len(sheets) == 0 {
-		return Dataset{}, nil
+		return Dataset{}, nil, nil
 	}
 
 	dataset := make(Dataset, len(sheets))
+	colOrder := make(map[string][]string, len(sheets))
 	for _, sheet := range sheets {
 		rows, err := f.GetRows(sheet)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(rows) == 0 {
 			dataset[normalizeTableName(sheet)] = []Record{}
@@ -129,6 +129,7 @@ func LoadXLSX(r io.Reader) (Dataset, error) {
 
 		headers := rows[0]
 		log.Printf("headers onglet %s: %v", sheet, headers)
+		colOrder[normalizeTableName(sheet)] = headers
 		records := make([]Record, 0, len(rows)-1)
 
 		for _, row := range rows[1:] {
@@ -148,21 +149,34 @@ func LoadXLSX(r io.Reader) (Dataset, error) {
 		dataset[normalizeTableName(sheet)] = records
 	}
 
-	return dataset, nil
+	return dataset, colOrder, nil
 }
 
 // Load charge des données depuis un lecteur en fonction du format fourni.
 // Les formats supportés sont : "csv", "json", "xlsx".
-func Load(r io.Reader, format string) (Dataset, error) {
+// Retourne également l'ordre des colonnes par table (nil si non applicable).
+func Load(r io.Reader, format string) (Dataset, map[string][]string, error) {
 	switch format {
 	case "csv":
-		return LoadCSV(r)
+		ds, headers, err := LoadCSV(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ds, map[string][]string{DefaultTableName: headers}, nil
 	case "json":
-		return LoadJSON(r)
+		ds, _, err := LoadJSON(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ds, nil, nil
 	case "xlsx":
-		return LoadXLSX(r)
+		ds, colOrder, err := LoadXLSX(r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ds, colOrder, nil
 	default:
-		return nil, &ErrUnsupportedFormat{Format: format}
+		return nil, nil, &ErrUnsupportedFormat{Format: format}
 	}
 }
 
@@ -220,17 +234,17 @@ func normalizeJSONValue(v interface{}) interface{} {
 	}
 }
 
-func LoadFile(path string) (Dataset, error) {
+func LoadFile(path string) (Dataset, map[string][]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 
 	format := GetFileExtension(path)
-	dataset, err := Load(file, format)
+	dataset, colOrder, err := Load(file, format)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if format == "csv" || format == "json" {
@@ -239,10 +253,16 @@ func LoadFile(path string) (Dataset, error) {
 			tableName = normalizeTableName(tableName)
 			delete(dataset, DefaultTableName)
 			dataset[tableName] = records
+			if colOrder != nil {
+				if order, ok := colOrder[DefaultTableName]; ok {
+					delete(colOrder, DefaultTableName)
+					colOrder[tableName] = order
+				}
+			}
 		}
 	}
 
-	return dataset, nil
+	return dataset, colOrder, nil
 }
 
 func GetFileExtension(path string) string {

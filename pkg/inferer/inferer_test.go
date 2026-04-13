@@ -12,7 +12,7 @@ func TestInferRuleSet(t *testing.T) {
 		{"id": int64(2), "name": "Bob", "email": "bob@example.com", "secret": "s2"},
 	}
 
-	cfg := InferRuleSet(ingest.Dataset{"default": recs})
+	cfg := InferRuleSet(ingest.Dataset{"default": recs}, nil)
 	if cfg == nil || len(cfg.Tables) != 1 {
 		t.Fatalf("expected 1 table rule, got %+v", cfg)
 	}
@@ -49,7 +49,7 @@ func TestInferRuleSet(t *testing.T) {
 }
 
 func TestInferRuleSetEmpty(t *testing.T) {
-	cfg := InferRuleSet(ingest.Dataset{})
+	cfg := InferRuleSet(ingest.Dataset{}, nil)
 	if cfg == nil || len(cfg.Tables) != 0 {
 		t.Fatalf("expected empty config for no records, got %+v", cfg)
 	}

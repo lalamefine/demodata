@@ -1,0 +1,45 @@
+# Règles d'anonymisation PostgreSQL — tables users + orders
+# Utiliser avec : demodata -driver pgx -dsn "postgres://demo:demopass@localhost:5432/testdb" -config test/rules/postgres_rules.yaml -seed 42
+
+tables:
+  - name: users
+    transformers:
+      - name: masker_email
+        type: masker
+        options:
+          column_name: email
+          mask_char: "*"
+
+      - name: masker_phone
+        type: masker
+        options:
+          column_name: phone
+          mask_char: "*"
+
+      - name: masker_address
+        type: masker
+        options:
+          column_name: address
+          mask_char: "*"
+
+      - name: shuffler_names
+        type: shuffler
+        options:
+          column_names:
+            - first_name
+            - last_name
+
+      - name: shuffler_city
+        type: shuffler
+        options:
+          column_names:
+            - city
+            - postal_code
+
+  - name: orders
+    transformers:
+      - name: masker_amount
+        type: masker
+        options:
+          column_name: amount
+          mask_char: "0"

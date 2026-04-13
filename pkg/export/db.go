@@ -3,6 +3,7 @@ package export
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,26 +30,50 @@ func ExportToDB(db *sql.DB, dataset ingest.Dataset, driver string) error {
 	}
 	sort.Strings(tableNames)
 
+	// Désactiver les contraintes FK le temps de la transaction
+	// MySQL : SET FOREIGN_KEY_CHECKS=0 ; PostgreSQL : SET CONSTRAINTS ALL DEFERRED
+	switch normalizeDriver(driver) {
+	case "mysql":
+		if _, err = tx.Exec("SET FOREIGN_KEY_CHECKS=0"); err != nil {
+			return fmt.Errorf("désactivation FK mysql: %w", err)
+		}
+		log.Printf("[export] FK MySQL désactivées pour la transaction")
+	case "pgx":
+		if _, err = tx.Exec("SET CONSTRAINTS ALL DEFERRED"); err != nil {
+			return fmt.Errorf("report contraintes pg: %w", err)
+		}
+		log.Printf("[export] contraintes PostgreSQL différées pour la transaction")
+	}
+
+	// Phase 1 : DELETE toutes les tables
 	for _, tableName := range tableNames {
 		if !validIdentifier.MatchString(tableName) {
-			return fmt.Errorf("nom de table invalide: %s", tableName)
-		}
-
-		if _, err = tx.Exec(fmt.Sprintf("DELETE FROM %s", tableName)); err != nil {
+			err = fmt.Errorf("nom de table invalide: %s", tableName)
 			return err
 		}
+		var result sql.Result
+		result, err = tx.Exec(fmt.Sprintf("DELETE FROM %s", tableName))
+		if err != nil {
+			return fmt.Errorf("delete %s: %w", tableName, err)
+		}
+		deleted, _ := result.RowsAffected()
+		log.Printf("[export] table %q : %d ligne(s) supprimée(s)", tableName, deleted)
+	}
 
+	// Phase 2 : INSERT toutes les tables
+	for _, tableName := range tableNames {
 		records := dataset[tableName]
 		if len(records) == 0 {
 			continue
 		}
 
-		cols := collectHeaders(records)
+		cols := collectHeaders(records, nil)
 		insertSQL := buildInsertSQL(tableName, cols, driver)
 		stmt, prepErr := tx.Prepare(insertSQL)
 		if prepErr != nil {
 			return prepErr
 		}
+		defer stmt.Close()
 
 		for _, rec := range records {
 			args := make([]any, len(cols))
@@ -56,12 +81,16 @@ func ExportToDB(db *sql.DB, dataset ingest.Dataset, driver string) error {
 				args[i] = rec[c]
 			}
 			if _, err = stmt.Exec(args...); err != nil {
-				_ = stmt.Close()
 				return err
 			}
 		}
-		if err = stmt.Close(); err != nil {
-			return err
+		log.Printf("[export] table %q : %d ligne(s) insérée(s)", tableName, len(records))
+	}
+
+	// Réactiver les FKs MySQL avant le commit
+	if normalizeDriver(driver) == "mysql" {
+		if _, err = tx.Exec("SET FOREIGN_KEY_CHECKS=1"); err != nil {
+			return fmt.Errorf("réactivation FK mysql: %w", err)
 		}
 	}
 

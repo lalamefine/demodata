@@ -2,8 +2,11 @@ package transform
 
 import (
 	"fmt"
+	"log"
+	"math"
 	"math/rand"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/lucasjones/reggen"
@@ -44,6 +47,7 @@ func ApplyRules(dataset ingest.Dataset, config *config.Config, seed int64) inges
 		out[tableName] = copied
 	}
 
+	log.Printf("[transform] application des règles (seed=%d, %d table(s) configurée(s))", seed, len(config.Tables))
 	for i, table := range config.Tables {
 		tableName := table.Name
 		if tableName == "" {
@@ -53,6 +57,7 @@ func ApplyRules(dataset ingest.Dataset, config *config.Config, seed int64) inges
 		if !ok {
 			continue
 		}
+		log.Printf("[transform] table %q : %d enregistrement(s), %d règle(s)", tableName, len(records), len(table.Transformers))
 
 		r := rand.New(rand.NewSource(seed + int64(i)))
 		transformer := &Transformer{}
@@ -70,8 +75,8 @@ func ApplyRules(dataset ingest.Dataset, config *config.Config, seed int64) inges
 				}
 				rule = &Masker{Column: col, MaskChar: maskChar}
 			case "shuffler":
-				cols, _ := tconf.Options["column_names"].(string)
-				rule = &Shuffler{ColumnNames: strings.Split(cols, ","), Rand: r}
+				cols := parseColumnNames(tconf.Options["column_names"])
+				rule = &Shuffler{ColumnNames: cols, Rand: r}
 				shufflers = append(shufflers, rule.(*Shuffler))
 			case "generator":
 				col, _ := tconf.Options["column_name"].(string)
@@ -252,4 +257,126 @@ func randomString(length int, r *rand.Rand) string {
 		sb.WriteByte(letters[r.Intn(len(letters))])
 	}
 	return sb.String()
+}
+
+func parseColumnNames(raw any) []string {
+	switch v := raw.(type) {
+	case []string:
+		return uniqueColumnNames(v)
+	case []any:
+		cols := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				cols = append(cols, s)
+			}
+		}
+		return uniqueColumnNames(cols)
+	case string:
+		return uniqueColumnNames(strings.Split(v, ","))
+	default:
+		return nil
+	}
+}
+
+// SampleDataset réduit chaque table du dataset à un sous-ensemble aléatoire reproductible.
+// rate est compris entre 0.0 et 1.0 (1.0 = 100%, 0.5 = 50%).
+// Si rate >= 1.0, le dataset est retourné sans modification.
+func SampleDataset(dataset ingest.Dataset, rate float64, seed int64) ingest.Dataset {
+	if rate >= 1.0 {
+		return dataset
+	}
+	if rate <= 0 {
+		rate = 0
+	}
+
+	// Ordre stable pour que le seed produise le même résultat.
+	tableNames := make([]string, 0, len(dataset))
+	for t := range dataset {
+		tableNames = append(tableNames, t)
+	}
+	sort.Strings(tableNames)
+
+	out := make(ingest.Dataset, len(dataset))
+	for i, tableName := range tableNames {
+		records := dataset[tableName]
+		if len(records) == 0 {
+			out[tableName] = records
+			continue
+		}
+		n := int(math.Round(float64(len(records)) * rate))
+		if n < 1 {
+			n = 1
+		}
+		if n >= len(records) {
+			out[tableName] = records
+			continue
+		}
+		r := rand.New(rand.NewSource(seed + int64(i)))
+		indices := r.Perm(len(records))[:n]
+		sort.Ints(indices)
+		sampled := make([]ingest.Record, n)
+		for j, idx := range indices {
+			sampled[j] = records[idx]
+		}
+		log.Printf("[transform] table %q : échantillon %d/%d enregistrement(s) (%.0f%%)", tableName, n, len(records), rate*100)
+		out[tableName] = sampled
+	}
+	return out
+}
+
+// FilterFKViolations supprime des tables enfants les enregistrements dont la colonne FK
+// ne référence plus une valeur présente dans la table parente (après échantillonnage).
+// Les relations FK sont lues depuis le schéma BDD via ingest.GetForeignKeys.
+func FilterFKViolations(dataset ingest.Dataset, relations []ingest.FKRelation) ingest.Dataset {
+	for _, rel := range relations {
+		parent, parentOK := dataset[rel.ParentTable]
+		child, childOK := dataset[rel.ChildTable]
+		if !parentOK || !childOK {
+			continue
+		}
+
+		// Construire le set des valeurs valides dans la table parente.
+		validKeys := make(map[string]struct{}, len(parent))
+		for _, rec := range parent {
+			if v, ok := rec[rel.ParentCol]; ok && v != nil {
+				validKeys[fmt.Sprintf("%v", v)] = struct{}{}
+			}
+		}
+
+		// Filtrer les lignes enfants qui référencent une valeur absente.
+		before := len(child)
+		filtered := child[:0:0] // slice vide, même backing array évité
+		filtered = make([]ingest.Record, 0, len(child))
+		for _, rec := range child {
+			fkVal := fmt.Sprintf("%v", rec[rel.ChildCol])
+			if _, ok := validKeys[fkVal]; ok {
+				filtered = append(filtered, rec)
+			}
+		}
+		removed := before - len(filtered)
+		if removed > 0 {
+			log.Printf("[transform] FK %s.%s → %s.%s : %d ligne(s) orpheline(s) supprimée(s) (%d restante(s))",
+				rel.ChildTable, rel.ChildCol, rel.ParentTable, rel.ParentCol,
+				removed, len(filtered))
+		}
+		dataset[rel.ChildTable] = filtered
+	}
+	return dataset
+}
+
+func uniqueColumnNames(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }

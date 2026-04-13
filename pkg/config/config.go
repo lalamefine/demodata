@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -32,7 +33,7 @@ type TransformerGeneratorConfig struct {
 }
 
 type TransformerShufflerConfig struct {
-	ColumnNames string `json:"column_names" yaml:"column_names"`
+	ColumnNames []string `json:"column_names" yaml:"column_names"`
 }
 
 type TransformerMaskerConfig struct {
@@ -49,18 +50,23 @@ const (
 	Boolean DataType = "boolean"
 )
 
-// LoadLit charge une configuration depuis un flux en JSON ou YAML.
+// Load charge une configuration depuis un flux en JSON ou YAML.
 func Load(r io.Reader) (*Config, error) {
-	jsondecoder := json.NewDecoder(r)
-
-	jsondecoder.UseNumber()
-	yamldecoder := yaml.NewDecoder(r)
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
 
 	var config Config
-	if err := jsondecoder.Decode(&config); err != nil {
-		if err := yamldecoder.Decode(&config); err != nil {
-			return nil, err
-		}
+	jsondecoder := json.NewDecoder(bytes.NewReader(raw))
+	jsondecoder.UseNumber()
+	if err := jsondecoder.Decode(&config); err == nil {
+		return &config, nil
+	}
+
+	yamldecoder := yaml.NewDecoder(bytes.NewReader(raw))
+	if err := yamldecoder.Decode(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
